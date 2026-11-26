@@ -121,6 +121,7 @@ jobs:
         run: |
           ls -la
           gh release create "${{ needs.version.outputs.tag }}" \
+            -R "${{ github.repository }}" \
             creatorplaza-bots-windows.zip \
             creatorplaza-bots-linux.tar.gz \
             creatorplaza-bots-android.apk \
