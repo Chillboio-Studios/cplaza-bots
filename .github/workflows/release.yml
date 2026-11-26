@@ -1,0 +1,129 @@
+name: Release All Builds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          V=$(grep '^version:' client/pubspec.yaml | sed 's/.*: *//; s/+.*//')
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build Windows release
+        working-directory: client
+        run: flutter build windows --release
+      - name: Package
+        shell: pwsh
+        working-directory: client
+        run: |
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" `
+            -DestinationPath "..\creatorplaza-bots-windows.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: creatorplaza-bots-windows.zip
+
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+      - name: Build Linux release
+        working-directory: client
+        run: flutter build linux --release
+      - name: Package
+        working-directory: client
+        run: tar -czf ../creatorplaza-bots-linux.tar.gz -C build/linux/x64/release/bundle .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: creatorplaza-bots-linux.tar.gz
+
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Accept Android licenses
+        run: yes | flutter doctor --android-licenses || true
+      - name: Build APK
+        working-directory: client
+        run: flutter build apk --release
+      - name: Package
+        run: cp client/build/app/outputs/flutter-apk/app-release.apk creatorplaza-bots-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: creatorplaza-bots-android.apk
+
+  web:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build web
+        working-directory: client
+        run: flutter build web --release
+      - name: Package
+        working-directory: client
+        run: tar -czf ../creatorplaza-bots-web.tar.gz -C build/web .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-bundle
+          path: creatorplaza-bots-web.tar.gz
+
+  release:
+    needs: [version, windows, linux, android, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la
+          gh release create "${{ needs.version.outputs.tag }}" \
+            creatorplaza-bots-windows.zip \
+            creatorplaza-bots-linux.tar.gz \
+            creatorplaza-bots-android.apk \
+            creatorplaza-bots-web.tar.gz \
+            --title "CreatorPlaza Bots ${{ needs.version.outputs.tag }}" \
+            --generate-notes
