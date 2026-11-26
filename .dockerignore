@@ -1,0 +1,7 @@
+node_modules
+client
+creatorplaza.db
+creatorplaza.db-*
+*.log
+nul
+.git
