@@ -125,5 +125,6 @@ jobs:
             creatorplaza-bots-linux.tar.gz \
             creatorplaza-bots-android.apk \
             creatorplaza-bots-web.tar.gz \
+            --repo "${{ github.repository }}" \
             --title "CreatorPlaza Bots ${{ needs.version.outputs.tag }}" \
             --generate-notes
