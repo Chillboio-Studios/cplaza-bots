@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
+import '../updater.dart';
 import 'editor_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -26,6 +27,96 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     _load();
+    _checkForUpdate();
+  }
+
+  Future<void> _checkForUpdate() async {
+    if (!AppUpdater.supported) return;
+    final latest = await AppUpdater.checkForUpdate();
+    if (latest == null || !mounted) return;
+    final proceed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update available'),
+        content: Text('CreatorPlaza Bots v$latest is ready to install.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Later')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Update')),
+        ],
+      ),
+    );
+    if (proceed != true || !mounted) return;
+
+    var progress = 0.0;
+    var finished = false;
+    String? error;
+    var started = false;
+    var open = true;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) {
+          if (!started) {
+            started = true;
+            AppUpdater.downloadUpdate(latest, onProgress: (p) {
+              progress = p;
+              if (open) setDlg(() {});
+            }).then((_) {
+              finished = true;
+              if (open) setDlg(() {});
+            }).catchError((e) {
+              error = e.toString();
+              finished = true;
+              if (open) setDlg(() {});
+            });
+          }
+          return AlertDialog(
+            title: const Text('Downloading update'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!finished)
+                  Column(
+                    children: [
+                      LinearProgressIndicator(
+                          value: progress > 0 ? progress : null),
+                      const SizedBox(height: 8),
+                      Text('${(progress * 100).toStringAsFixed(0)}%'),
+                    ],
+                  )
+                else if (error != null)
+                  Text(error!, style: const TextStyle(color: Colors.red))
+                else
+                  const Text('Ready — restart to finish updating.'),
+              ],
+            ),
+            actions: [
+              if (finished && error == null)
+                ElevatedButton(
+                  onPressed: AppUpdater.applyAndRestart,
+                  child: const Text('Restart now'),
+                )
+              else if (finished)
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Close'))
+              else
+                const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+            ],
+          );
+        },
+      ),
+    ).whenComplete(() => open = false);
   }
 
   Future<void> _load() async {
