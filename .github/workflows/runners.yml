@@ -39,6 +39,7 @@ jobs:
           context: .
           file: runners/${{ matrix.lang }}/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/cpb-runner-${{ matrix.lang }}:latest
+          # GHCR requires lowercase repository paths
+          tags: ghcr.io/chillboio-studios/cpb-runner-${{ matrix.lang }}:latest
           cache-from: type=gha,scope=cpb-runner-${{ matrix.lang }}
           cache-to: type=gha,mode=max,scope=cpb-runner-${{ matrix.lang }}
