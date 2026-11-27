@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY db.js auth.js engine.js server.js ./
+COPY db.js auth.js engine.js k8s.js server.js ./
 COPY public ./public
 
 ENV NODE_ENV=production

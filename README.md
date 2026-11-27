@@ -84,6 +84,15 @@ The `creatorplaza` SCRAM user was added to `infra/databases/mongodb.yaml`.
 **Env vars:** `MONGODB_URI`, `PORT` (3000), `PUBLIC_URL`
 (https://botapi.creatorplaza.nl — used for share links), `ADMIN_USERNAMES`.
 
+**Custom bots (premium):** `k8s.js` manages per-user pods in the
+`custom-bots` namespace (manifests in `ArgoCD-Deployment-Files/apps/custom-bots/`).
+Env vars: `CUSTOM_BOTS_NAMESPACE`, `RUNNER_IMAGE_PREFIX`
+(`ghcr.io/chillboio-studios/cpb-runner`), `CUSTOM_BOT_BASE_DOMAIN`
+(`custom.creatorplaza.nl`), `CUSTOM_BOT_LIMIT` (default 3).
+Runner images are built by `.github/workflows/runners.yml` → GHCR
+(`cpb-runner-python|nodejs|java|cpp`). See `apps/custom-bots/README.md` for
+the required wildcard DNS record.
+
 ## API
 
 | Method | Route | Description |
@@ -98,13 +107,21 @@ The `creatorplaza` SCRAM user was added to `infra/databases/mongodb.yaml`.
 | PUT  | `/api/bots/:id` | Update bot |
 | DELETE | `/api/bots/:id` | Delete bot |
 | POST | `/api/bots/:id/deploy` | `{action: start\|stop\|restart}` |
+| GET  | `/api/custom-bots` | List your custom bots (premium) |
+| POST | `/api/custom-bots` | Deploy repo → pod `{name, repo_url, branch, language, startup_script, port, domain\|subdomain, env}` |
+| GET/PUT/DELETE | `/api/custom-bots/:id` | Get / update / delete |
+| POST | `/api/custom-bots/:id/restart` | Restart pod (fresh clone) |
+| GET  | `/api/custom-bots/:id/logs?tail=` | Pod logs |
+| GET  | `/api/custom-bots/:id/status` | Live k8s status |
 
 Auth via `Authorization: Bearer <token>` header.
 
 ## Plans & admin
 
 - **Free**: 1 bot, 15 commands max (enforced server-side on create/update)
-- **Premium**: unlimited bots & commands
+- **Premium**: unlimited bots & commands, plus custom bots — deploy any public
+  GitHub repo (python/nodejs/java/cpp) as its own pod with optional domain +
+  automatic SSL
 - `/admin` — web admin panel (login with an admin account). Admins are set via
   `ADMIN_USERNAMES=user1,user2` env var at startup, or promoted via
   `POST /api/admin/users/:id/role {"role":"admin"}`.

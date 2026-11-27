@@ -1,0 +1,44 @@
+name: Runner Images
+
+# Builds the per-language runner images used by premium custom bots.
+# Each image clones a public GitHub repo at pod start and runs the user's
+# startup script (see runners/run.sh).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runners/**'
+      - '.github/workflows/runners.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lang: [python, nodejs, java, cpp]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: runners/${{ matrix.lang }}/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/cpb-runner-${{ matrix.lang }}:latest
+          cache-from: type=gha,scope=cpb-runner-${{ matrix.lang }}
+          cache-to: type=gha,mode=max,scope=cpb-runner-${{ matrix.lang }}

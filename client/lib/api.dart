@@ -182,6 +182,49 @@ class ApiClient {
     final data = await _request('GET', '/api/share/$code');
     return {'name': data['name'], 'config': decodeConfigForShare(data['config'])};
   }
+
+  // ---------- custom bots (premium) ----------
+
+  Future<List<Map<String, dynamic>>> listCustomBots() async {
+    final data = await _request('GET', '/api/custom-bots');
+    return List<Map<String, dynamic>>.from(data['bots']);
+  }
+
+  Future<Map<String, dynamic>> getCustomBot(int id) async {
+    final data = await _request('GET', '/api/custom-bots/$id');
+    return data['bot'];
+  }
+
+  /// fields: name, repo_url, branch, language, startup_script, port,
+  /// domain or subdomain, env {KEY: VALUE}
+  Future<Map<String, dynamic>> createCustomBot(
+      Map<String, dynamic> fields) async {
+    final data = await _request('POST', '/api/custom-bots', body: fields);
+    return data['bot'];
+  }
+
+  Future<Map<String, dynamic>> updateCustomBot(
+      int id, Map<String, dynamic> fields) async {
+    final data = await _request('PUT', '/api/custom-bots/$id', body: fields);
+    return data['bot'];
+  }
+
+  Future<void> deleteCustomBot(int id) async {
+    await _request('DELETE', '/api/custom-bots/$id');
+  }
+
+  Future<void> restartCustomBot(int id) async {
+    await _request('POST', '/api/custom-bots/$id/restart');
+  }
+
+  Future<Map<String, dynamic>> customBotLogs(int id,
+      {int tail = 200}) async {
+    return await _request('GET', '/api/custom-bots/$id/logs?tail=$tail');
+  }
+
+  Future<Map<String, dynamic>> customBotStatus(int id) async {
+    return await _request('GET', '/api/custom-bots/$id/status');
+  }
 }
 
 Map<String, dynamic> decodeConfigForShare(dynamic raw) {

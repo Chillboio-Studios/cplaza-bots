@@ -3,6 +3,7 @@ import '../api.dart';
 import '../models.dart';
 import '../updater.dart';
 import 'editor_screen.dart';
+import 'custom_bots_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   final ApiClient api;
@@ -366,6 +367,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         title: const Text('CreatorPlaza Bots'),
         actions: [
+          IconButton(
+            tooltip: 'Custom bots (premium)',
+            icon: const Icon(Icons.hub_outlined),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    CustomBotsScreen(api: widget.api, user: widget.user),
+              ),
+            ),
+          ),
           IconButton(
             tooltip: 'Import shared bot',
             icon: const Icon(Icons.upload_outlined),

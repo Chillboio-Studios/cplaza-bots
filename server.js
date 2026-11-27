@@ -4,6 +4,7 @@ const path = require('path');
 const auth = require('./auth');
 const db = require('./db');
 const engine = require('./engine');
+const k8s = require('./k8s');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -327,6 +328,298 @@ a{display:inline-block;margin-top:16px;background:#5865f2;color:#fff;padding:12p
 <body><div class="card"><h2>🤖 ${safe}</h2><p>This Discord bot config is shared via CreatorPlaza Bots.</p>
 <p>Import it in the app to customize and deploy your own copy.</p>
 <a href="/api/share/${req.params.code}">View config JSON</a></div></body></html>`);
+});
+
+// ---------- custom bots (premium: GitHub repo -> dedicated k8s pod) ----------
+const CUSTOM_BOT_LIMIT = parseInt(process.env.CUSTOM_BOT_LIMIT || '3', 10);
+const CUSTOM_BOT_LANGUAGES = new Set(['python', 'nodejs', 'java', 'cpp']);
+const CUSTOM_BOT_FIELDS = {
+  projection: { _id: 0, startup_script: 0 },
+};
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+const REPO_RE = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i;
+const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
+const SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
+const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+function publicCustomBot(doc) {
+  if (!doc) return doc;
+  const { _id, ...rest } = doc;
+  return rest;
+}
+
+async function canUseCustomBots(user) {
+  return (await isPremium(user.id)) || (await isAdminUser(user));
+}
+
+async function requireCustomBotAccess(req, res) {
+  if (!k8s.available()) {
+    res.status(503).json({ error: 'Custom bots are not available on this deployment' });
+    return false;
+  }
+  if (!(await canUseCustomBots(req.user))) {
+    res.status(403).json({ error: 'Custom bots require a Premium plan' });
+    return false;
+  }
+  return true;
+}
+
+// Normalize + validate a complete custom-bot spec. Throws HttpError.
+function validateCustomBotFields(input) {
+  const name = String(input.name || '').trim();
+  if (name.length < 3 || name.length > 48 || !/^[A-Za-z0-9][A-Za-z0-9 _-]*$/.test(name)) {
+    throw new HttpError(400, 'Name must be 3-48 chars (letters, numbers, spaces, _ -)');
+  }
+
+  const repoMatch = REPO_RE.exec(String(input.repo_url || '').trim());
+  if (!repoMatch) {
+    throw new HttpError(400, 'Repository must be a public GitHub URL: https://github.com/owner/repo');
+  }
+  const repoUrl = `https://github.com/${repoMatch[1]}/${repoMatch[2]}`;
+
+  const branch = String(input.branch || 'main').trim() || 'main';
+  if (!BRANCH_RE.test(branch) || branch.includes('..')) {
+    throw new HttpError(400, 'Invalid branch name');
+  }
+
+  const language = String(input.language || '').toLowerCase();
+  if (!CUSTOM_BOT_LANGUAGES.has(language)) {
+    throw new HttpError(400, 'Language must be one of: python, nodejs, java, cpp');
+  }
+
+  const startupScript = String(input.startup_script || '').trim();
+  if (!startupScript || startupScript.length > 4000) {
+    throw new HttpError(400, 'Startup script is required (max 4000 chars)');
+  }
+
+  const port = parseInt(input.port, 10);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new HttpError(400, 'Port must be between 1024 and 65535');
+  }
+
+  // domain: full hostname, or subdomain under the cluster base domain.
+  const domain = String(input.domain || '').trim().toLowerCase().replace(/\.$/, '');
+  const subdomain = String(input.subdomain || '').trim().toLowerCase();
+  if (domain && subdomain) {
+    throw new HttpError(400, 'Provide either a domain or a subdomain, not both');
+  }
+  let hostname = null;
+  if (domain) {
+    if (!HOSTNAME_RE.test(domain)) throw new HttpError(400, 'Invalid domain');
+    hostname = domain;
+  } else if (subdomain) {
+    if (!SUBDOMAIN_RE.test(subdomain)) throw new HttpError(400, 'Invalid subdomain');
+    hostname = `${subdomain}.${k8s.BASE_DOMAIN}`;
+  }
+
+  return { name, repo_url: repoUrl, branch, language, startup_script: startupScript, port, hostname };
+}
+
+function validateEnv(input) {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    throw new HttpError(400, 'env must be an object of KEY: VALUE pairs');
+  }
+  const entries = Object.entries(input);
+  if (entries.length > 50) throw new HttpError(400, 'Too many env vars (max 50)');
+  const env = {};
+  for (const [k, v] of entries) {
+    if (!ENV_KEY_RE.test(k)) throw new HttpError(400, `Invalid env var name: ${k}`);
+    env[k] = String(v ?? '').slice(0, 4096);
+  }
+  return env;
+}
+
+async function assertHostnameFree(hostname, excludeId = null) {
+  if (!hostname) return;
+  const q = { hostname };
+  if (excludeId !== null) q.id = { $ne: Number(excludeId) };
+  const existing = await db.cols.customBots.findOne(q, { projection: { id: 1, name: 1 } });
+  if (existing) {
+    throw new HttpError(409, `Domain already in use by "${existing.name}"`);
+  }
+}
+
+app.get('/api/custom-bots', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const bots = await db.cols.customBots
+      .find({ user_id: Number(req.user.id) }, CUSTOM_BOT_FIELDS)
+      .sort({ id: -1 }).toArray();
+    res.json({ bots: bots.map(publicCustomBot) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to list custom bots' });
+  }
+});
+
+app.get('/api/custom-bots/:id', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const bot = await db.cols.customBots.findOne(
+      { id: Number(req.params.id), user_id: Number(req.user.id) });
+    if (!bot) return res.status(404).json({ error: 'Custom bot not found' });
+
+    // refresh status from the cluster when possible
+    try {
+      const live = await k8s.statusCustomBot(bot.id);
+      if (live.status !== bot.status) {
+        await db.cols.customBots.updateOne({ id: bot.id }, { $set: { status: live.status } });
+        bot.status = live.status;
+      }
+      bot.k8s = live;
+    } catch { /* cluster unreachable — serve stored status */ }
+    res.json({ bot: publicCustomBot(bot) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to get custom bot' });
+  }
+});
+
+app.post('/api/custom-bots', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const fields = validateCustomBotFields(req.body || {});
+    const env = validateEnv(req.body?.env);
+    await assertHostnameFree(fields.hostname);
+
+    const count = await db.cols.customBots.countDocuments({ user_id: Number(req.user.id) });
+    if (count >= CUSTOM_BOT_LIMIT) {
+      throw new HttpError(403, `Custom bot limit reached (${CUSTOM_BOT_LIMIT}). Contact support to raise it.`);
+    }
+
+    const doc = {
+      id: await db.nextId('custom_bots'),
+      user_id: Number(req.user.id),
+      ...fields,
+      env_keys: env ? Object.keys(env) : [],
+      status: 'deploying',
+      status_message: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
+    await db.cols.customBots.insertOne(doc);
+
+    try {
+      await k8s.applyCustomBot(doc, env || {});
+    } catch (e) {
+      await db.cols.customBots.updateOne({ id: doc.id },
+        { $set: { status: 'error', status_message: `Deploy failed: ${e.message}`.slice(0, 500) } });
+      doc.status = 'error';
+      doc.status_message = `Deploy failed: ${e.message}`.slice(0, 500);
+      return res.status(502).json({ error: doc.status_message, bot: publicCustomBot(doc) });
+    }
+    res.status(201).json({ bot: publicCustomBot(doc) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to create custom bot' });
+  }
+});
+
+app.put('/api/custom-bots/:id', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const existing = await db.cols.customBots.findOne(
+      { id: Number(req.params.id), user_id: Number(req.user.id) });
+    if (!existing) return res.status(404).json({ error: 'Custom bot not found' });
+
+    // merge provided fields over the stored spec, then validate the result
+    const merged = {
+      name: req.body?.name ?? existing.name,
+      repo_url: req.body?.repo_url ?? existing.repo_url,
+      branch: req.body?.branch ?? existing.branch,
+      language: req.body?.language ?? existing.language,
+      startup_script: req.body?.startup_script ?? existing.startup_script,
+      port: req.body?.port ?? existing.port,
+      domain: req.body?.domain,
+      subdomain: req.body?.subdomain,
+    };
+    // domain/subdomain omitted -> keep existing hostname
+    if (merged.domain === undefined && merged.subdomain === undefined) {
+      merged.hostname = existing.hostname;
+      merged.domain = existing.hostname;
+    }
+    const fields = validateCustomBotFields(merged);
+    await assertHostnameFree(fields.hostname, existing.id);
+
+    const env = validateEnv(req.body?.env); // undefined = keep existing secret
+    const envKeys = env !== undefined ? Object.keys(env) : (existing.env_keys || []);
+
+    const $set = { ...fields, env_keys: envKeys, status: 'deploying', status_message: null, updated_at: new Date() };
+    await db.cols.customBots.updateOne({ id: existing.id }, { $set });
+    const doc = { ...existing, ...$set };
+
+    try {
+      await k8s.applyCustomBot(doc, env);
+    } catch (e) {
+      await db.cols.customBots.updateOne({ id: existing.id },
+        { $set: { status: 'error', status_message: `Deploy failed: ${e.message}`.slice(0, 500) } });
+      return res.status(502).json({ error: `Deploy failed: ${e.message}` });
+    }
+    const bot = await db.cols.customBots.findOne({ id: existing.id });
+    res.json({ bot: publicCustomBot(bot) });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to update custom bot' });
+  }
+});
+
+app.delete('/api/custom-bots/:id', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const existing = await db.cols.customBots.findOne(
+      { id: Number(req.params.id), user_id: Number(req.user.id) }, { projection: { id: 1 } });
+    if (!existing) return res.status(404).json({ error: 'Custom bot not found' });
+    await k8s.removeCustomBot(existing.id).catch(e =>
+      console.error(`[custom-bots] k8s cleanup failed for ${existing.id}:`, e.message));
+    await db.cols.customBots.deleteOne({ id: existing.id });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to delete custom bot' });
+  }
+});
+
+app.post('/api/custom-bots/:id/restart', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const bot = await db.cols.customBots.findOne(
+      { id: Number(req.params.id), user_id: Number(req.user.id) }, { projection: { id: 1 } });
+    if (!bot) return res.status(404).json({ error: 'Custom bot not found' });
+    const pods = await k8s.restartCustomBot(bot.id);
+    await db.cols.customBots.updateOne({ id: bot.id }, { $set: { status: 'deploying' } });
+    res.json({ ok: true, pods });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to restart custom bot' });
+  }
+});
+
+app.get('/api/custom-bots/:id/logs', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const bot = await db.cols.customBots.findOne(
+      { id: Number(req.params.id), user_id: Number(req.user.id) }, { projection: { id: 1 } });
+    if (!bot) return res.status(404).json({ error: 'Custom bot not found' });
+    const tail = parseInt(req.query.tail, 10) || 200;
+    const result = await k8s.logsCustomBot(bot.id, tail);
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to fetch logs' });
+  }
+});
+
+app.get('/api/custom-bots/:id/status', requireAuth, async (req, res) => {
+  try {
+    if (!(await requireCustomBotAccess(req, res))) return;
+    const bot = await db.cols.customBots.findOne(
+      { id: Number(req.params.id), user_id: Number(req.user.id) }, { projection: { id: 1 } });
+    if (!bot) return res.status(404).json({ error: 'Custom bot not found' });
+    const live = await k8s.statusCustomBot(bot.id);
+    await db.cols.customBots.updateOne({ id: bot.id }, { $set: { status: live.status } });
+    res.json({ status: live });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || 'Failed to fetch status' });
+  }
 });
 
 // ---------- admin ----------

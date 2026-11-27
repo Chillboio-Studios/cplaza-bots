@@ -29,6 +29,7 @@ async function init() {
     users: db.collection('users'),
     sessions: db.collection('sessions'),
     bots: db.collection('bots'),
+    customBots: db.collection('custom_bots'),
     shares: db.collection('shares'),
     counters: db.collection('counters'),
     leases: db.collection('leases'),
@@ -37,6 +38,7 @@ async function init() {
     cols.users.createIndex({ username: 1 }, { unique: true }),
     cols.sessions.createIndex({ token: 1 }, { unique: true }),
     cols.bots.createIndex({ user_id: 1 }),
+    cols.customBots.createIndex({ user_id: 1 }),
     cols.shares.createIndex({ bot_id: 1 }),
     cols.shares.createIndex({ code: 1 }, { unique: true }),
   ]);
